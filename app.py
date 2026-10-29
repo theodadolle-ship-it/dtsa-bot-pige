@@ -114,7 +114,7 @@ def evaluate_listing(
     if pd.isna(dist):
         reasons.append("Distance non vérifiée")
 
-     status = "À vérifier"
+    status = "À vérifier"
 
     explicit_pro = seller_type in {
         "professionnel", "pro", "business", "dealer"
