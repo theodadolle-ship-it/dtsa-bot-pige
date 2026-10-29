@@ -98,11 +98,14 @@ def evaluate_listing(
     if defects:
         reasons.append("Défaut important signalé : " + ", ".join(defects[:3]))
 
+    
     price = pd.to_numeric(row.get("price_eur", None), errors="coerce")
     if pd.isna(price) or price < min_price or price > max_price:
-    reasons.append(
-        f"Prix hors plage ou absent ({min_price}–{max_price} €)"
-    )
+        reasons.append(
+            f"Prix hors plage ou absent ({min_price}–{max_price} €)"
+        )
+
+
 
     # Distance : utilise la distance déjà fournie par la source/import. Pas de géocodage supposé.
     dist = pd.to_numeric(row.get("distance_km", None), errors="coerce")
