@@ -1,144 +1,167 @@
-import re
-import io
+ 
 import os
+import re
 import json
 import sqlite3
 from datetime import datetime
-from urllib.parse import urlparse
+
 import pandas as pd
 import streamlit as st
 
 APP_TITLE = "DTSA — Pige automobile"
 DB_PATH = os.getenv("DTSA_DB_PATH", "dtsa_annonces.db")
 
-st.set_page_config(page_title=APP_TITLE, page_icon="🚗", layout="wide")
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon="🚗",
+    layout="wide",
+)
 
-# Filtrage volontairement prudent : les annonces douteuses sont mises en revue ou exclues.
 NO_CONTACT_PATTERNS = [
-    r"\bpas de démarchage téléphonique\b",
-    r"\bpas de demarchage telephonique\b",
-    r"\bpas de démarchage\b",
-    r"\bpas de demarchage\b",
-    r"\bpas d'appel\b",
-    r"\bpas d appel\b",
-    r"\bne pas appeler\b",
-    r"\bpas de téléphone\b",
-    r"\bpas de telephone\b",
-    r"\bpas de professionnels?\b",
+    r"\bpas de demarchage",
+    r"\bpas d'appel",
+    r"\bpas d appel",
+    r"\bne pas appeler",
+    r"\bpas de telephone",
+    r"\bprofessionnels s'abstenir",
+    r"\bprofessionnels s abstenir",
     r"\bpas de pro\b",
-    r"\bprofessionnels? s'abstenir\b",
-    r"\bprofessionnels? s abstenir\b",
-    r"\bpro s'abstenir\b",
-    r"\bpas d'agence\b",
     r"\bpas de garage\b",
+    r"\bpas d'agence\b",
 ]
+
 PRO_PATTERNS = [
-    r"\bprofessionnel\b", r"\bprofessionnels\b", r"\bgarage\b",
-    r"\bconcessionnaire\b", r"\bnégoce automobile\b", r"\bnegoce automobile\b",
-    r"\bauto-entrepreneur\b", r"\bSAS\b", r"\bSARL\b", r"\bSIRET\b",
-    r"\bgarantie 3 mois\b", r"\bgarantie 6 mois\b", r"\bgarantie 12 mois\b",
-    r"\bfinancement\b", r"\breprise possible\b", r"\bprix TTC\b",
+    r"\bprofessionnel\b",
+    r"\bprofessionnels\b",
+    r"\bgarage\b",
+    r"\bconcessionnaire\b",
+    r"\bnegoce automobile\b",
+    r"\bauto-entrepreneur\b",
+    r"\bSIRET\b",
+    r"\bgarantie 3 mois\b",
+    r"\bgarantie 6 mois\b",
+    r"\bgarantie 12 mois\b",
+    r"\breprise possible\b",
 ]
-SERIOUS_DEFECT_PATTERNS = [
-    r"\bmoteur HS\b", r"\bmoteur à changer\b", r"\bmoteur a changer\b",
-    r"\bboîte HS\b", r"\bboite HS\b", r"\bboîte à changer\b", r"\bboite a changer\b",
-    r"\bnon roulante\b", r"\bne démarre pas\b", r"\bne demarre pas\b",
-    r"\baccidentée\b", r"\baccidentee\b", r"\bvéhicule accidenté\b",
-    r"\bpour pièces\b", r"\bpour pieces\b", r"\bjoint de culasse\b",
-    r"\bproblème moteur\b", r"\bprobleme moteur\b",
+
+DEFECT_PATTERNS = [
+    r"\bmoteur HS\b",
+    r"\bmoteur a changer\b",
+    r"\bboite HS\b",
+    r"\bboite a changer\b",
+    r"\bnon roulante\b",
+    r"\bne demarre pas\b",
+    r"\baccidentee\b",
+    r"\bpour pieces\b",
+    r"\bjoint de culasse\b",
+    r"\bprobleme moteur\b",
 ]
-PHONE_RE = re.compile(r"(?<!\d)(?:\+33\s?[1-9](?:[\s.-]?\d{2}){4}|0[1-9](?:[\s.-]?\d{2}){4})(?!\d)")
+
+PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+33\s?[1-9](?:[\s.-]?\d{2}){4}"
+    r"|0[1-9](?:[\s.-]?\d{2}){4})(?!\d)"
+)
+
 
 def norm(value):
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    if value is None or pd.isna(value):
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
 
-def text_for_match(value):
-    s = norm(value).lower()
-    replacements = str.maketrans({"é":"e","è":"e","ê":"e","ë":"e","à":"a","â":"a","î":"i","ï":"i","ô":"o","ù":"u","û":"u","ç":"c"})
-    return s.translate(replacements)
 
-def first_matches(text, patterns):
-    t = text_for_match(text)
-    found = []
-    for p in patterns:
-        if re.search(text_for_match(p), t, flags=re.I):
-            found.append(p.replace(r"\b", "").replace("\\", ""))
-    return found
+def clean_text(value):
+    text = norm(value).lower()
+    replacements = str.maketrans({
+        "é": "e", "è": "e", "ê": "e", "ë": "e",
+        "à": "a", "â": "a", "î": "i", "ï": "i",
+        "ô": "o", "ù": "u", "û": "u", "ç": "c",
+    })
+    return text.translate(replacements)
 
-def extract_phone(text):
-    # Ne recherche que dans le texte explicitement fourni/importé. Ne contourne aucune protection.
-    m = PHONE_RE.search(str(text or ""))
-    return m.group(0) if m else ""
+
+def has_pattern(text, patterns):
+    text = clean_text(text)
+    return any(
+        re.search(pattern, text, flags=re.I)
+        for pattern in patterns
+    )
+
+
+def to_number(value):
+    if value is None or pd.isna(value):
+        return None
+    try:
+        result = float(str(value).replace(" ", "").replace(",", "."))
+        return result if pd.notna(result) else None
+    except (ValueError, TypeError):
+        return None
+
 
 def evaluate_listing(
     row,
-    center_lat=None,
-    center_lon=None,
     radius_km=30,
     min_price=3000,
-    max_price=200000
+    max_price=200000,
 ):
-    title = norm(row.get("title", ""))
-    desc = norm(row.get("description", ""))
-    combined = title + " " + desc
+    title = norm(row.get("title"))
+    description = norm(row.get("description"))
+    combined = title + " " + description
+
     reasons = []
-    no_contact = first_matches(combined, NO_CONTACT_PATTERNS)
-    pro = first_matches(combined, PRO_PATTERNS)
-    defects = first_matches(combined, SERIOUS_DEFECT_PATTERNS)
 
-    seller_type = text_for_match(row.get("seller_type", ""))
-    if seller_type in {"professionnel", "pro", "business", "dealer"}:
-        reasons.append("Vendeur identifié comme professionnel")
-    elif seller_type in {"particulier", "private", "individual"}:
-        pass
-    elif pro:
-        reasons.append("Indices de vendeur professionnel à vérifier")
-    if no_contact:
-        reasons.append("Restriction de contact détectée : " + ", ".join(no_contact[:3]))
-    if defects:
-        reasons.append("Défaut important signalé : " + ", ".join(defects[:3]))
+    no_contact = has_pattern(combined, NO_CONTACT_PATTERNS)
+    professional = has_pattern(combined, PRO_PATTERNS)
+    defect = has_pattern(combined, DEFECT_PATTERNS)
 
-    
-    price = pd.to_numeric(row.get("price_eur", None), errors="coerce")
-    if pd.isna(price) or price < min_price or price > max_price:
-        reasons.append(
-            f"Prix hors plage ou absent ({min_price}–{max_price} €)"
-        )
+    seller = clean_text(row.get("seller_type", ""))
 
+    price = to_number(row.get("price_eur"))
+    distance = to_number(row.get("distance_km"))
+    market = to_number(row.get("market_price_eur"))
 
-
-    # Distance : utilise la distance déjà fournie par la source/import. Pas de géocodage supposé.
-    dist = pd.to_numeric(row.get("distance_km", None), errors="coerce")
-    if not pd.isna(dist) and dist > radius_km:
-        reasons.append(f"Hors rayon ({dist:g} km > {radius_km} km)")
-    if pd.isna(dist):
-        reasons.append("Distance non vérifiée")
-
-    status = "À vérifier"
-
-    explicit_pro = seller_type in {
-        "professionnel", "pro", "business", "dealer"
+    explicit_pro = seller in {
+        "pro", "professionnel", "business", "dealer"
     }
-    invalid_price = (
-        pd.isna(price) or price < min_price or price > max_price
-    )
-    invalid_distance = (
-        pd.isna(dist) or dist < 0 or dist > radius_km
-    )
 
-    if no_contact or explicit_pro or invalid_price:
+    if explicit_pro:
+        reasons.append("Vendeur professionnel")
+    elif professional:
+        reasons.append("Vendeur potentiellement professionnel")
+
+    if no_contact:
+        reasons.append("Restriction de contact détectée")
+
+    if defect:
+        reasons.append("Défaut important signalé")
+
+    if price is None or not min_price <= price <= max_price:
+        reasons.append("Prix absent ou hors plage")
+
+    if distance is None:
+        reasons.append("Distance non vérifiée")
+    elif distance < 0 or distance > radius_km:
+        reasons.append("Distance hors rayon")
+
+    # Les exclusions sont appliquées avant l'estimation de marché.
+    if no_contact or explicit_pro:
         status = "Exclue"
-    elif pro or defects or invalid_distance:
+    elif price is None or not min_price <= price <= max_price:
+        status = "Exclue"
+    elif distance is not None and (
+        distance < 0 or distance > radius_km
+    ):
+        status = "Exclue"
+    elif professional or defect or distance is None:
         status = "À vérifier"
     else:
-        status = "À vérifier"
+        status = "Retenue"
 
-    # Estimation marché optionnelle : fournie par l'utilisateur ou par un futur fournisseur de données autorisé.
-    market = pd.to_numeric(row.get("market_price_eur", None), errors="coerce")
     deal = "Non évaluée"
     discount = None
-    if not pd.isna(price) and not pd.isna(market) and market > 0:
-        discount = (market - price) / market * 100
+
+    if price is not None and market is not None and market > 0:
+        discount = round((market - price) / market * 100, 1)
+
         if discount >= 15:
             deal = "Très bonne affaire"
         elif discount >= 8:
@@ -150,153 +173,291 @@ def evaluate_listing(
     elif status != "Exclue":
         deal = "Estimation marché nécessaire"
 
-    # L'absence de téléphone n'est pas un motif d'exclusion.
-    phone = norm(row.get("phone_public", "")) or extract_phone(combined)
-    if status == "Exclue":
-        keep = False
-    else:
-        keep = True
+    phone = norm(row.get("phone_public"))
+
+    if not phone:
+        match = PHONE_RE.search(combined)
+        phone = match.group(0) if match else ""
 
     return {
-        "status": status, "deal": deal, "discount_pct": discount,
-        "reasons": "; ".join(reasons) if reasons else "Aucun filtre bloquant détecté",
-        "phone_found": phone, "keep": keep
+        "status": status,
+        "deal": deal,
+        "discount_pct": discount,
+        "reasons": "; ".join(reasons) or "Aucun filtre bloquant détecté",
+        "phone_found": phone,
     }
 
+
 def ensure_db():
-    con = sqlite3.connect(DB_PATH)
-    con.execute("""CREATE TABLE IF NOT EXISTS listings (
-        listing_id TEXT PRIMARY KEY, title TEXT, price_eur REAL, make TEXT, model TEXT,
-        year INTEGER, mileage_km REAL, fuel TEXT, transmission TEXT, location TEXT,
-        distance_km REAL, seller_type TEXT, description TEXT, url TEXT, phone_public TEXT,
-        market_price_eur REAL, first_seen TEXT, source TEXT, raw_json TEXT
-    )""")
-    con.commit()
-    con.close()
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS listings (
+                listing_id TEXT PRIMARY KEY,
+                title TEXT,
+                price_eur REAL,
+                make TEXT,
+                model TEXT,
+                year INTEGER,
+                mileage_km REAL,
+                fuel TEXT,
+                transmission TEXT,
+                location TEXT,
+                distance_km REAL,
+                seller_type TEXT,
+                description TEXT,
+                url TEXT,
+                phone_public TEXT,
+                market_price_eur REAL,
+                first_seen TEXT,
+                source TEXT,
+                raw_json TEXT
+            )
+        """)
+
+
+def safe_value(value):
+    if value is None or pd.isna(value):
+        return None
+    return value
+
+
+def load_file(uploaded):
+    if uploaded.name.lower().endswith(".csv"):
+        return pd.read_csv(uploaded, sep=None, engine="python")
+
+    data = json.load(uploaded)
+    if isinstance(data, dict):
+        data = data.get("listings", [])
+    if not isinstance(data, list):
+        raise ValueError("Le JSON doit contenir une liste d'annonces.")
+    return pd.DataFrame(data)
+
+
+def save_listings(imported, source):
+    saved = 0
+
+    columns = [
+        "listing_id", "title", "price_eur", "make", "model",
+        "year", "mileage_km", "fuel", "transmission", "location",
+        "distance_km", "seller_type", "description", "url",
+        "phone_public", "market_price_eur", "first_seen",
+        "source", "raw_json",
+    ]
+
+    with sqlite3.connect(DB_PATH) as con:
+        for _, series in imported.iterrows():
+            row = series.to_dict()
+
+            url = norm(row.get("url"))
+            title = norm(row.get("title"))
+            price = to_number(row.get("price_eur"))
+
+            listing_id = (
+                norm(row.get("listing_id"))
+                or url
+                or f"{title}-{price}"
+            )
+
+            if not listing_id.strip("-"):
+                continue
+
+            analysis = evaluate_listing(
+                row,
+                radius_km=radius,
+                min_price=min_price,
+                max_price=max_price,
+            )
+
+            payload = {
+                "listing_id": listing_id,
+                "title": title,
+                "price_eur": price,
+                "make": norm(row.get("make")),
+                "model": norm(row.get("model")),
+                "year": to_number(row.get("year")),
+                "mileage_km": to_number(row.get("mileage_km")),
+                "fuel": norm(row.get("fuel")),
+                "transmission": norm(row.get("transmission")),
+                "location": norm(row.get("location")),
+                "distance_km": to_number(row.get("distance_km")),
+                "seller_type": norm(row.get("seller_type")),
+                "description": norm(row.get("description")),
+                "url": url,
+                "phone_public": analysis["phone_found"],
+                "market_price_eur": to_number(
+                    row.get("market_price_eur")
+                ),
+                "first_seen": norm(row.get("first_seen"))
+                    or datetime.now().isoformat(timespec="seconds"),
+                "source": source,
+                "raw_json": json.dumps(
+                    row, ensure_ascii=False, default=str
+                ),
+            }
+
+            values = tuple(
+                safe_value(payload[key]) for key in columns
+            )
+
+            con.execute(
+                """
+                INSERT OR REPLACE INTO listings
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?)
+                """,
+                values,
+            )
+            saved += 1
+
+    return saved
+
 
 ensure_db()
 
-st.title("🚗 DTSA — Pige automobile")
-st.caption("Écully (69130) · rayon 30 km · 3 000 à 200 000 € · vendeurs particuliers")
-st.info("Prototype prêt à tester : import CSV/JSON et analyse des descriptions. La collecte automatique horaire nécessite une source autorisée (flux/API/alertes exportées) et sa configuration.")
+st.title(APP_TITLE)
+st.caption(
+    "Écully (69130) · annonces de particuliers · "
+    "rayon et budget personnalisables"
+)
+
+st.info(
+    "Importe des annonces provenant d'une source autorisée. "
+    "La collecte automatique nécessite une API ou un flux autorisé."
+)
 
 with st.sidebar:
     st.header("Paramètres")
     center = st.text_input("Centre de recherche", "Écully, 69130")
     radius = st.slider("Rayon (km)", 5, 100, 30, 5)
-    min_price = st.number_input("Prix minimum (€)", min_value=0, max_value=200000, value=3000, step=500)
-    max_price = st.number_input("Prix maximum (€)", min_value=3000, max_value=500000, value=200000, step=5000)
-    st.caption("La distance doit être fournie par la source d'annonces ou calculée avec un géocodage autorisé.")
+    min_price = st.number_input(
+        "Prix minimum (€)", 0, 200000, 3000, 500
+    )
+    max_price = st.number_input(
+        "Prix maximum (€)", 3000, 500000, 200000, 5000
+    )
+
+    if min_price > max_price:
+        st.error("Le prix minimum doit être inférieur au maximum.")
 
 st.subheader("1. Importer les annonces")
-st.markdown("Importe un CSV exporté depuis une source autorisée, ou un JSON préparé. Colonnes recommandées : `listing_id`, `title`, `price_eur`, `make`, `model`, `year`, `mileage_km`, `fuel`, `location`, `distance_km`, `seller_type`, `description`, `url`, `phone_public`, `market_price_eur`.")
-uploaded = st.file_uploader("Fichier CSV ou JSON", type=["csv", "json"])
-if uploaded:
+
+uploaded = st.file_uploader(
+    "Fichier CSV ou JSON",
+    type=["csv", "json"],
+)
+
+if uploaded and min_price <= max_price:
     try:
-        if uploaded.name.lower().endswith(".csv"):
-            imported = pd.read_csv(uploaded)
-        else:
-            raw = json.load(uploaded)
-            imported = pd.DataFrame(raw if isinstance(raw, list) else raw.get("listings", []))
-        st.success(f"{len(imported)} annonce(s) importée(s) pour analyse.")
+        imported = load_file(uploaded)
+
+        st.success(f"{len(imported)} annonce(s) importée(s).")
         st.dataframe(imported.head(10), use_container_width=True)
-        if st.button("Analyser et enregistrer les annonces", type="primary"):
-            results = []
-            con = sqlite3.connect(DB_PATH)
-            for _, r in imported.iterrows():
-                row = r.to_dict()
-                row.setdefault("price_eur", None)
-                row.setdefault("description", "")
-                row.setdefault("title", "")
-                row.setdefault("seller_type", "")
-                row.setdefault("distance_km", None)
-                row.setdefault("market_price_eur", None)
-                row.setdefault("phone_public", "")
-                url = norm(row.get("url", ""))
-                lid = norm(row.get("listing_id", "")) or url or f"{norm(row.get('title'))}-{row.get('price_eur','')}"
-                analysis = evaluate_listing(
-    row,
-    radius_km=radius,
-    min_price=min_price,
-    max_price=max_price
-)
-                payload = {
-                    "listing_id": lid, "title": norm(row.get("title")), "price_eur": pd.to_numeric(row.get("price_eur"), errors="coerce"),
-                    "make": norm(row.get("make")), "model": norm(row.get("model")), "year": pd.to_numeric(row.get("year"), errors="coerce"),
-                    "mileage_km": pd.to_numeric(row.get("mileage_km"), errors="coerce"), "fuel": norm(row.get("fuel")),
-                    "transmission": norm(row.get("transmission")), "location": norm(row.get("location")),
-                    "distance_km": pd.to_numeric(row.get("distance_km"), errors="coerce"), "seller_type": norm(row.get("seller_type")),
-                    "description": norm(row.get("description")), "url": url, "phone_public": analysis["phone_found"],
-                    "market_price_eur": pd.to_numeric(row.get("market_price_eur"), errors="coerce"),
-                    "first_seen": norm(row.get("first_seen")) or datetime.now().isoformat(timespec="seconds"),
-                    "source": norm(row.get("source")) or uploaded.name, "raw_json": json.dumps(row, ensure_ascii=False, default=str)
-                }
-                con.execute("""INSERT OR REPLACE INTO listings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            tuple(payload[k] for k in ["listing_id","title","price_eur","make","model","year","mileage_km","fuel","transmission","location","distance_km","seller_type","description","url","phone_public","market_price_eur","first_seen","source","raw_json"]))
-                results.append({**payload, **analysis})
-            con.commit()
-            con.close()
-            st.session_state["last_results"] = pd.DataFrame(results)
-            st.success("Analyse terminée et données enregistrées.")
 
-    except Exception as e:
-        st.error(f"Impossible de lire/analyser le fichier : {e}")
+        if st.button("Analyser et enregistrer", type="primary"):
+            count = save_listings(imported, uploaded.name)
+            st.session_state["import_done"] = count
+            st.success(f"{count} annonce(s) enregistrée(s).")
+            st.rerun()
 
-if "last_results" in st.session_state:
-    st.subheader("2. Résultats du dernier import")
-    res = st.session_state["last_results"]
-    st.dataframe(res[["title","price_eur","make","model","year","mileage_km","distance_km","status","deal","discount_pct","reasons","phone_found","url"]], use_container_width=True, hide_index=True)
-    st.download_button("Télécharger les résultats CSV", res.to_csv(index=False).encode("utf-8-sig"), "dtsa_resultats.csv", "text/csv")
+    except Exception as error:
+        st.error(f"Erreur pendant l'import : {error}")
 
-st.subheader("3. Tableau de bord")
-con = sqlite3.connect(DB_PATH)
-df = pd.read_sql_query("SELECT * FROM listings ORDER BY first_seen DESC", con)
-con.close()
+st.subheader("2. Tableau de bord")
+
+with sqlite3.connect(DB_PATH) as con:
+    df = pd.read_sql_query(
+        "SELECT * FROM listings ORDER BY first_seen DESC",
+        con,
+    )
+
 if df.empty:
-    st.write("Aucune annonce enregistrée pour le moment. Importe un premier fichier pour commencer.")
+    st.info("Aucune annonce enregistrée. Importe un fichier CSV.")
 else:
-    analyses = []
-    for _, r in df.iterrows():
-        a = evaluate_listing(
-    r.to_dict(),
-    radius_km=radius,
-    min_price=min_price,
-    max_price=max_price
-)
-        analyses.append(a)
+    analyses = [
+        evaluate_listing(
+            row,
+            radius_km=radius,
+            min_price=min_price,
+            max_price=max_price,
+        )
+        for row in df.to_dict("records")
+    ]
+
     df["status"] = [a["status"] for a in analyses]
     df["deal"] = [a["deal"] for a in analyses]
     df["reasons"] = [a["reasons"] for a in analyses]
     df["discount_pct"] = [a["discount_pct"] for a in analyses]
-    a,b,c,d = st.columns(4)
 
-a.metric("Annonces en base", len(df))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Annonces en base", len(df))
+    c2.metric(
+        "Retenues / à vérifier",
+        int(df["status"].isin(["Retenue", "À vérifier"]).sum()),
+    )
+    c3.metric(
+        "Bonnes affaires",
+        int(df["deal"].eq("Bonne affaire").sum()),
+    )
+    c4.metric(
+        "Très bonnes affaires",
+        int(df["deal"].eq("Très bonne affaire").sum()),
+    )
 
-b.metric(
-    "À vérifier / retenues",
-    int((df.status != "Exclue").sum())
-)
+    statuses = st.multiselect(
+        "Afficher les statuts",
+        ["Retenue", "À vérifier", "Exclue"],
+        default=["Retenue", "À vérifier"],
+    )
 
-c.metric(
-    "Bonnes affaires (total)",
-    int(df.deal.isin(["Très bonne affaire", "Bonne affaire"]).sum())
-)
+    deals = st.multiselect(
+        "Catégories de prix",
+        [
+            "Très bonne affaire",
+            "Bonne affaire",
+            "Prix équitable",
+            "Au-dessus du marché",
+            "Estimation marché nécessaire",
+            "Non évaluée",
+        ],
+        default=[
+            "Très bonne affaire",
+            "Bonne affaire",
+            "Prix équitable",
+            "Estimation marché nécessaire",
+        ],
+    )
 
-d.metric(
-    "Dont très bonnes affaires",
-    int((df.deal == "Très bonne affaire").sum())
-)
-    filter_status = st.multiselect("Afficher les statuts", ["À vérifier","Exclue"], default=["À vérifier"])
-    filter_deal = st.multiselect("Catégories de prix", ["Très bonne affaire","Bonne affaire","Prix équitable","Au-dessus du marché","Estimation marché nécessaire","Non évaluée"], default=["Très bonne affaire","Bonne affaire","Prix équitable","Estimation marché nécessaire"])
-    view = df[df.status.isin(filter_status) & df.deal.isin(filter_deal)].copy()
-    st.dataframe(view[["title","price_eur","make","model","year","mileage_km","location","distance_km","seller_type","deal","status","reasons","phone_public","url","first_seen"]], use_container_width=True, hide_index=True)
-    st.download_button("Exporter le tableau complet", view.to_csv(index=False).encode("utf-8-sig"), "dtsa_tableau.csv", "text/csv")
+    view = df[
+        df["status"].isin(statuses) & df["deal"].isin(deals)
+    ].copy()
 
-st.subheader("Règles de sécurité et limites")
+    st.dataframe(
+        view[
+            [
+                "title", "price_eur", "make", "model", "year",
+                "mileage_km", "location", "distance_km",
+                "seller_type", "deal", "status", "reasons",
+                "url",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.download_button(
+        "Exporter les résultats CSV",
+        view.to_csv(index=False).encode("utf-8-sig"),
+        "dtsa_resultats.csv",
+        "text/csv",
+    )
+
+st.subheader("3. Limites et sécurité")
 st.markdown("""
-- Le bot ne contourne pas les protections de Leboncoin et ne récupère pas de téléphone masqué.
-- Les annonces mentionnant un refus de démarchage ou de contact téléphonique sont exclues.
-- Les annonces dont le statut vendeur est ambigu sont marquées « À vérifier », pas automatiquement considérées comme particulières.
-- Une estimation fiable de bonne affaire nécessite une valeur de marché issue d'une source fiable. Sans cette donnée, le bot ne prétend pas connaître le prix du marché.
-- Avant une mise en production, vérifier les conditions d'utilisation de la source d'annonces, les droits de réutilisation des données et les obligations RGPD applicables.
+- Les annonces douteuses doivent être vérifiées manuellement.
+- Le bot n'essaie pas de contourner les protections des sites.
+- Il n'invente pas d'estimation de prix de marché.
+- Le téléphone est lu uniquement dans les données fournies.
+- La distance doit être fournie par la source importée.
+- Une base SQLite locale peut être temporaire sur certains hébergeurs.
+- Vérifie les conditions d'utilisation des sources et les obligations RGPD.
 """)
