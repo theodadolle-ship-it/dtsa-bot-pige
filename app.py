@@ -70,7 +70,14 @@ def extract_phone(text):
     m = PHONE_RE.search(str(text or ""))
     return m.group(0) if m else ""
 
-def evaluate_listing(row, center_lat=None, center_lon=None, radius_km=30):
+def evaluate_listing(
+    row,
+    center_lat=None,
+    center_lon=None,
+    radius_km=30,
+    min_price=3000,
+    max_price=200000
+):
     title = norm(row.get("title", ""))
     desc = norm(row.get("description", ""))
     combined = title + " " + desc
@@ -92,8 +99,10 @@ def evaluate_listing(row, center_lat=None, center_lon=None, radius_km=30):
         reasons.append("Défaut important signalé : " + ", ".join(defects[:3]))
 
     price = pd.to_numeric(row.get("price_eur", None), errors="coerce")
-    if pd.isna(price) or price < 3000 or price > 200000:
-        reasons.append("Prix hors plage ou absent (3 000–200 000 €)")
+    if pd.isna(price) or price < min_price or price > max_price:
+    reasons.append(
+        f"Prix hors plage ou absent ({min_price}–{max_price} €)"
+    )
 
     # Distance : utilise la distance déjà fournie par la source/import. Pas de géocodage supposé.
     dist = pd.to_numeric(row.get("distance_km", None), errors="coerce")
@@ -102,10 +111,23 @@ def evaluate_listing(row, center_lat=None, center_lon=None, radius_km=30):
     if pd.isna(dist):
         reasons.append("Distance non vérifiée")
 
-    status = "À vérifier"
-    if no_contact or seller_type in {"professionnel", "pro", "business", "dealer"} or (not pd.isna(price) and (price < 3000 or price > 200000)):
+     status = "À vérifier"
+
+    explicit_pro = seller_type in {
+        "professionnel", "pro", "business", "dealer"
+    }
+    invalid_price = (
+        pd.isna(price) or price < min_price or price > max_price
+    )
+    invalid_distance = (
+        pd.isna(dist) or dist < 0 or dist > radius_km
+    )
+
+    if no_contact or explicit_pro or invalid_price:
         status = "Exclue"
-    elif pro or defects or pd.isna(dist) or dist > radius_km:
+    elif pro or defects or invalid_distance:
+        status = "À vérifier"
+    else:
         status = "À vérifier"
 
     # Estimation marché optionnelle : fournie par l'utilisateur ou par un futur fournisseur de données autorisé.
@@ -189,7 +211,12 @@ if uploaded:
                 row.setdefault("phone_public", "")
                 url = norm(row.get("url", ""))
                 lid = norm(row.get("listing_id", "")) or url or f"{norm(row.get('title'))}-{row.get('price_eur','')}"
-                analysis = evaluate_listing(row, radius_km=radius)
+                analysis = evaluate_listing(
+    row,
+    radius_km=radius,
+    min_price=min_price,
+    max_price=max_price
+)
                 payload = {
                     "listing_id": lid, "title": norm(row.get("title")), "price_eur": pd.to_numeric(row.get("price_eur"), errors="coerce"),
                     "make": norm(row.get("make")), "model": norm(row.get("model")), "year": pd.to_numeric(row.get("year"), errors="coerce"),
@@ -227,17 +254,35 @@ if df.empty:
 else:
     analyses = []
     for _, r in df.iterrows():
-        a = evaluate_listing(r.to_dict(), radius_km=radius)
+        a = evaluate_listing(
+    r.to_dict(),
+    radius_km=radius,
+    min_price=min_price,
+    max_price=max_price
+)
         analyses.append(a)
     df["status"] = [a["status"] for a in analyses]
     df["deal"] = [a["deal"] for a in analyses]
     df["reasons"] = [a["reasons"] for a in analyses]
     df["discount_pct"] = [a["discount_pct"] for a in analyses]
     a,b,c,d = st.columns(4)
-    a.metric("Annonces en base", len(df))
-    b.metric("À vérifier / retenues", int((df.status != "Exclue").sum()))
-    c.metric("Bonnes affaires", int(df.deal.isin(["Très bonne affaire","Bonne affaire"]).sum()))
-    d.metric("Très bonnes affaires", int((df.deal == "Très bonne affaire").sum()))
+
+a.metric("Annonces en base", len(df))
+
+b.metric(
+    "À vérifier / retenues",
+    int((df.status != "Exclue").sum())
+)
+
+c.metric(
+    "Bonnes affaires (total)",
+    int(df.deal.isin(["Très bonne affaire", "Bonne affaire"]).sum())
+)
+
+d.metric(
+    "Dont très bonnes affaires",
+    int((df.deal == "Très bonne affaire").sum())
+)
     filter_status = st.multiselect("Afficher les statuts", ["À vérifier","Exclue"], default=["À vérifier"])
     filter_deal = st.multiselect("Catégories de prix", ["Très bonne affaire","Bonne affaire","Prix équitable","Au-dessus du marché","Estimation marché nécessaire","Non évaluée"], default=["Très bonne affaire","Bonne affaire","Prix équitable","Estimation marché nécessaire"])
     view = df[df.status.isin(filter_status) & df.deal.isin(filter_deal)].copy()
